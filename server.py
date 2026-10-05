@@ -4,6 +4,10 @@ import uuid
 import re
 import struct
 import tempfile
+import asyncio
+import edge_tts
+import hashlib
+
 from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory, send_file, after_this_request
 from dotenv import load_dotenv
@@ -11,11 +15,6 @@ from groq import Groq
 from rag import answer_query
 from llm import generate_answer
 from preprocessing import extract_pdf_text, clean_text
-
-import asyncio
-import edge_tts
-import hashlib
-
 EDGE_VOICE = "en-US-AndrewNeural"   
 
 load_dotenv()
@@ -24,7 +23,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STT_MODEL = "whisper-large-v3-turbo"
 TTS_MODEL = "canopylabs/orpheus-v1-english"
 TTS_VOICE = "troy"
-
 RECORDINGS_DIR = os.path.join(BASE_DIR, "voice_recordings")
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -34,27 +32,12 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 
 app = Flask(__name__)
 
-
-# =========================================================
-# WAV header fix (streamed TTS output)
-# =========================================================
-
 def fix_wav_header(path):
-    """
-    Groq's streamed WAV output leaves the RIFF chunk size and data
-    chunk size fields at placeholder values instead of the real file
-    size. Most players tolerate this by reading until EOF, but strict
-    parsers (Python's `wave` module, some mobile browsers) misreport
-    duration or fail to seek. This patches both size fields in place
-    after the file is fully written.
-    """
     with open(path, "r+b") as f:
         f.seek(0, os.SEEK_END)
         file_size = f.tell()
-
         f.seek(4)
         f.write(struct.pack("<I", file_size - 8))
-
         f.seek(12)
         while True:
             chunk_id = f.read(4)
@@ -70,24 +53,14 @@ def fix_wav_header(path):
                 break
             f.seek(chunk_size, os.SEEK_CUR)
 
-
-# =========================================================
-# Static routes
-# =========================================================
-
 @app.route("/")
 def index():
     return send_from_directory(BASE_DIR, "Medix-ui.html")
-
 
 @app.route("/api/health")
 def health():
     return jsonify({"status": "ok"})
 
-
-# =========================================================
-# Main Q&A (manuals already indexed in the vector DB)
-# =========================================================
 CLOSING_RE = re.compile(
     r"^\s*(ok(ay)?[,. ]*)?(thanks|thank you|thanks a lot|thank you so much|that'?s all|bye|goodbye)[\s.!,]*$",
     re.I,
@@ -103,6 +76,7 @@ def ask():
 
     if len(query) > 1000:
         return jsonify({"error": "Query is too long."}), 400
+    
     if CLOSING_RE.match(query):
         msg = "You're welcome! Good luck with the repair."
         return jsonify({
@@ -118,12 +92,12 @@ def ask():
             top_k=8,
         )
         print(f"[timing] /api/ask (retrieval + LLM) took {time.time() - t0:.2f}s")
+
     except Exception as error:
         print(f"[ERROR] /api/ask failed: {error}")
         return jsonify({
             "error": "The assistant couldn't process this question right now. Please try again in a moment."
         }), 502
-
     return jsonify(
         {
             "answer": result.get("answer", ""),
@@ -133,11 +107,6 @@ def ask():
         }
     )
 
-
-# =========================================================
-# Text-to-speech
-# =========================================================
-
 EDGE_VOICE = "en-US-GuyNeural"
 
 async def _edge_save(text, path):
@@ -145,10 +114,8 @@ async def _edge_save(text, path):
         text, EDGE_VOICE, rate="+8%", pitch="+0Hz"
     ).save(path)
 
-
 CACHE_DIR = os.path.join(BASE_DIR, "tts_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
-
 
 @app.route("/api/speech", methods=["POST"])
 def speech():
@@ -177,12 +144,7 @@ def speech():
             return jsonify({"error": "Text-to-speech generation failed. Please try again."}), 502
     else:
         print("[timing] /api/speech served from cache")
-
     return send_file(final_path, mimetype="audio/mpeg")
-
-# =========================================================
-# Speech-to-text
-# =========================================================
 
 @app.route("/api/transcribe", methods=["POST"])
 def transcribe():
@@ -208,54 +170,33 @@ def transcribe():
     except Exception as error:
         print(f"[ERROR] /api/transcribe failed: {error}")
         return jsonify({"error": "Couldn't transcribe the audio. Please try again."}), 502
-
     return jsonify({"text": text})
-
-
-# =========================================================
-# Ask-about-an-uploaded-file
-# =========================================================
 
 MAX_FILE_CONTEXT_CHARS = 12000
 MAX_FILE_PAGES = 8
-
 STOPWORDS = {
     "the", "a", "an", "is", "are", "was", "were", "to", "of", "in",
     "on", "for", "and", "or", "with", "if", "has", "have", "this",
     "that", "from", "by", "as", "be", "it", "may", "can", "what",
     "should", "do", "i", "my", "me",
 }
-
 FAULT_SECTION_MARKERS = (
     "troubleshooting", "malfunction", "symptom or condition",
     "possible cause", "fault", "error code",
 )
 
-
 def _score_page(page_text, query_words):
     page_lower = page_text.lower()
-
     meaningful_words = query_words - STOPWORDS
     if not meaningful_words:
-        meaningful_words = query_words  # fall back rather than score nothing
+        meaningful_words = query_words  
 
-    # Frequency-weighted, not just presence/absence -- a word repeated
-    # throughout a page is a stronger signal than appearing once.
     score = sum(page_lower.count(w) for w in meaningful_words)
-
     if any(marker in page_lower for marker in FAULT_SECTION_MARKERS):
-        score += 20  # outweighs normal keyword counts on descriptive pages
-
+        score += 20  
     return score
 
-
 def _extract_text_from_upload(file_storage):
-    """
-    Extracts text from an uploaded PDF/TXT/DOCX file as a list of
-    {"page": n, "text": "..."} dicts -- same shape preprocessing.py's
-    extract_pdf_text() already returns, so both can be scored the
-    same way below.
-    """
     filename = file_storage.filename or ""
     suffix = Path(filename).suffix.lower()
 
@@ -281,7 +222,6 @@ def _extract_text_from_upload(file_storage):
             os.remove(tmp_path)
         return [{"page": 1, "text": clean_text(full_text)}]
 
-    # Default: treat anything else as a PDF.
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(file_storage.read())
         tmp_path = tmp.name
@@ -291,17 +231,8 @@ def _extract_text_from_upload(file_storage):
         os.remove(tmp_path)
     return pages
 
-
 def _build_context_from_pages(pages, query, device_label):
-    """
-    Keyword-ranks the uploaded file's pages against the query (no
-    embeddings needed for a single ad-hoc document) and formats the
-    most relevant ones as numbered SOURCEs, matching exactly what
-    prompts.py's SYSTEM_PROMPT already expects from the main
-    retrieval pipeline.
-    """
     query_words = set(re.findall(r"[a-z0-9]+", query.lower()))
-
     scored = [
         (page.get("page", i + 1), page.get("text", ""), _score_page(page.get("text", ""), query_words))
         for i, page in enumerate(pages)
@@ -309,7 +240,6 @@ def _build_context_from_pages(pages, query, device_label):
     ]
     scored = [item for item in scored if item[2] > 0]
     scored.sort(key=lambda item: item[2], reverse=True)
-
     selected = []
     total_chars = 0
     for page_number, text, _score in scored:
@@ -320,11 +250,8 @@ def _build_context_from_pages(pages, query, device_label):
 
     if not selected:
         return ""
-
-    # Read order, not relevance order -- closer to how a technician
-    # would actually read the selected pages.
+    
     selected.sort(key=lambda item: item[0])
-
     parts = []
     for index, (page_number, text) in enumerate(selected, start=1):
         parts.append(
@@ -337,7 +264,6 @@ def _build_context_from_pages(pages, query, device_label):
         )
     return "\n\n".join(parts)
 
-
 @app.route("/api/ask_file", methods=["POST"])
 def ask_file():
     query = (request.form.get("query") or "").strip()
@@ -345,13 +271,11 @@ def ask_file():
         return jsonify({"error": "query is required"}), 400
     if len(query) > 1000:
         return jsonify({"error": "Query is too long."}), 400
-
     if "file" not in request.files:
         return jsonify({"error": "file is required"}), 400
 
     file_storage = request.files["file"]
     device_label = Path(file_storage.filename or "uploaded file").stem
-
     try:
         pages = _extract_text_from_upload(file_storage)
     except RuntimeError as error:
@@ -384,7 +308,6 @@ def ask_file():
         "device": device_label,
         "retrieval_type": "uploaded_file",
     })
-
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=True, use_reloader=False)

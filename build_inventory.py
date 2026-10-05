@@ -27,9 +27,7 @@ def infer_manufacturer(filename: str) -> str:
         for x in ["ge healthcare", "ge_"]
     ):
         return "GE"
-
     return "Unknown"
-
 
 def build_inventory():
     pdf_files = sorted(MANUALS_DIR.glob("*.pdf"))
@@ -43,7 +41,6 @@ def build_inventory():
             stem,
             flags=re.IGNORECASE,
         )
-
         inventory[pdf_path.name] = {
             "device_id": slugify(stem),
             "device": stem,
@@ -54,12 +51,7 @@ def build_inventory():
     output_path = (MANUALS_DIR.parent / "device_inventory.json")
 
     with open(output_path,"w",encoding="utf-8",) as f:
-        json.dump(
-            inventory,
-            f,
-            indent=4,
-            ensure_ascii=False,
-        )
+        json.dump( inventory,f,indent=4,ensure_ascii=False)
     print(f"PDFs found: {len(pdf_files)}")
     print(f"Inventory saved to: {output_path}")
 

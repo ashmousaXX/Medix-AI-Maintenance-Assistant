@@ -1,30 +1,17 @@
 import re
 import time
-
 from retrieval import retrieve
 
-# =========================================================
-# Config
-# =========================================================
 LLM_CALL_DELAY_SECONDS = 15
-
 LLM_FAILURE_PREFIX = "The assistant did not return a response"
-
 STOPWORDS = {
     "the", "a", "an", "is", "are", "was", "were", "to", "of", "in",
     "on", "for", "and", "or", "with", "if", "has", "have", "this",
     "that", "from", "by", "as", "be", "it", "may", "can",
 }
 
-
-# =========================================================
-# Test cases
-# =========================================================
-
 TEST_CASES = [
-    # -----------------------------------------------------
-    # Servo Ventilator
-    # -----------------------------------------------------
+    
     {
         "name": "Servo - Transducer malfunction",
         "query": "The inspiratory flow transducer is defective",
@@ -54,9 +41,6 @@ TEST_CASES = [
         "expected_answer_terms": ["pressure"],
     },
 
-    # -----------------------------------------------------
-    # Philips / Agilent Monitor
-    # -----------------------------------------------------
     {
         "name": "Philips - Blank screen",
         "query": "The patient monitor screen is blank",
@@ -72,9 +56,6 @@ TEST_CASES = [
         "expected_answer_terms": ["power supply", "fuse"],
     },
 
-    # -----------------------------------------------------
-    # Siemens SC6002XL
-    # -----------------------------------------------------
     {
         "name": "SC6002XL - Display malfunction",
         "query": "Parts of the display are missing or the colors look wrong",
@@ -83,9 +64,6 @@ TEST_CASES = [
         "expected_answer_terms": ["Front Panel PC Board"],
     },
 
-    # -----------------------------------------------------
-    # Negative test
-    # -----------------------------------------------------
     {
         "name": "Negative - Unrelated problem",
         "query": "How do I repair a home coffee machine?",
@@ -95,11 +73,6 @@ TEST_CASES = [
     },
 ]
 
-
-# =========================================================
-# Text normalization helpers
-# =========================================================
-
 def normalize(text):
     """Normalize text for loose comparison."""
     text = str(text or "").lower()
@@ -108,19 +81,16 @@ def normalize(text):
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
-
 def compact(text):
     """Stronger normalization used when comparing evidence with answers."""
     text = normalize(text)
     text = text.replace("**", "").replace("__", "")
     return text.strip()
 
-
 def content_words(text):
     """Extract meaningful words for conservative overlap checks."""
     words = re.findall(r"[a-z0-9]+", normalize(text))
     return {w for w in words if len(w) > 2 and w not in STOPWORDS}
-
 
 def word_overlap(text_a, text_b):
     """Ratio of meaningful words from text_a that also occur in text_b."""
@@ -129,7 +99,6 @@ def word_overlap(text_a, text_b):
     if not words_a:
         return 0.0
     return len(words_a & words_b) / len(words_a)
-
 
 def contains_expected_terms(text, expected_terms):
     """
@@ -140,21 +109,15 @@ def contains_expected_terms(text, expected_terms):
     text = normalize(text)
     if not expected_terms:
         return True, []
-
     missing = []
     for term in expected_terms:
         words = normalize(term).split()
         found = all(w in text for w in words) if len(words) > 1 else normalize(term) in text
         if not found:
             missing.append(term)
-
     return len(missing) == 0, missing
 
-
-# =========================================================
 # SOURCE parsing
-# =========================================================
-
 def parse_sources(context):
     """
     Parse the retrieved LLM context into {1: "source 1 text", 2: ...}
@@ -167,15 +130,12 @@ def parse_sources(context):
 
     pattern = re.compile(r"(?im)^\s*SOURCE\s+(\d+)\s*$")
     matches = list(pattern.finditer(context))
-
     for i, match in enumerate(matches):
         number = int(match.group(1))
         start = match.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(context)
         sources[number] = context[start:end].strip()
-
     return sources
-
 
 def extract_source_numbers(text):
     """Extract all 'SOURCE N' references from the generated answer."""
@@ -184,24 +144,17 @@ def extract_source_numbers(text):
     matches = re.findall(r"\bSOURCE\s+(\d+)\b", str(text), flags=re.IGNORECASE)
     return sorted({int(n) for n in matches})
 
-
 def validate_source_citations(answer, context):
     """Detect hallucinated SOURCE numbers (cited but not in context)."""
     available = parse_sources(context)
     cited = extract_source_numbers(answer)
     invalid = [n for n in cited if n not in available]
-
     return {
         "ok": len(invalid) == 0,
         "available_sources": sorted(available.keys()),
         "cited_sources": cited,
         "invalid_sources": invalid,
     }
-
-
-# =========================================================
-# Malfunction / Action extraction
-# =========================================================
 
 def extract_malfunction_action_pairs(source_text):
     """
@@ -213,7 +166,6 @@ def extract_malfunction_action_pairs(source_text):
     pairs = []
     if not source_text:
         return pairs
-
     chunks = re.split(r"(?i)\bMalfunction\s*:", source_text.strip())
 
     for chunk in chunks[1:]:
@@ -223,19 +175,13 @@ def extract_malfunction_action_pairs(source_text):
         if not action_match:
             pairs.append({"malfunction": chunk, "action": None})
             continue
-
         malfunction_text = chunk[:action_match.start()].strip()
         action_text = chunk[action_match.end():].strip()
-
-        # Stop the action at another Malfunction marker, if present.
         next_malfunction = re.search(r"(?i)\bMalfunction\s*:", action_text)
         if next_malfunction:
             action_text = action_text[:next_malfunction.start()].strip()
-
         pairs.append({"malfunction": malfunction_text, "action": action_text or None})
-
     return pairs
-
 
 def action_supported_by_source(action_text, source_text):
     """
@@ -245,14 +191,11 @@ def action_supported_by_source(action_text, source_text):
     """
     if not action_text:
         return False
-
     action = compact(action_text)
     source = compact(source_text)
     if not action:
         return False
-
     action_clean = re.sub(r"\(\s*source\s+\d+[^)]*\)", "", action, flags=re.IGNORECASE).strip()
-
     if action_clean and action_clean in source:
         return True
 
@@ -260,13 +203,7 @@ def action_supported_by_source(action_text, source_text):
     source_words = content_words(source)
     if not action_words:
         return False
-
     return len(action_words & source_words) / len(action_words) >= 0.65
-
-
-# =========================================================
-# Answer section extraction
-# =========================================================
 
 def extract_answer_sections(answer):
     """
@@ -275,32 +212,23 @@ def extract_answer_sections(answer):
     markdown formatting.
     """
     text = str(answer or "")
+    text = re.sub(r"(?im)^\s*\*?\s*is there anything else i can help you with\??\s*\*?\s*$","", text,)
     text = re.sub(r"(?i)\*\*matching fault:\*\*", "\nMATCHING_FAULT:\n", text)
     text = re.sub(r"(?i)\*\*manual action:\*\*", "\nMANUAL_ACTION:\n", text)
     text = re.sub(r"(?i)\*\*related faults in the manual:\*\*", "\nRELATED_FAULTS:\n", text)
-
     result = {"matching_fault": "", "manual_action": "", "related_faults": ""}
-
     match = re.search(
         r"(?is)MATCHING_FAULT:\s*(.*?)(?=\nMANUAL_ACTION:|\nRELATED_FAULTS:|$)", text
     )
     if match:
         result["matching_fault"] = match.group(1).strip()
-
     match = re.search(r"(?is)MANUAL_ACTION:\s*(.*?)(?=\nRELATED_FAULTS:|$)", text)
     if match:
         result["manual_action"] = match.group(1).strip()
-
     match = re.search(r"(?is)RELATED_FAULTS:\s*(.*)$", text)
     if match:
         result["related_faults"] = match.group(1).strip()
-
     return result
-
-
-# =========================================================
-# Multi-fault answer support (Rule 6c format)
-# =========================================================
 
 def _split_bulleted_segments(text):
     """
@@ -314,7 +242,6 @@ def _split_bulleted_segments(text):
     parts = [p.strip() for p in parts if p.strip()]
     return parts if len(parts) > 1 else [text]
 
-
 def _validate_multi_fault_answer(fault_bullets, action_bullets, sources):
     """
     Validate a multi-fault answer bullet by bullet: each fault bullet
@@ -325,11 +252,10 @@ def _validate_multi_fault_answer(fault_bullets, action_bullets, sources):
     """
     problems = []
     any_checked = False
-
     for fault_bullet in fault_bullets:
         fault_sources = extract_source_numbers(fault_bullet)
         if len(fault_sources) != 1:
-            continue  # ambiguous bullet — skip rather than guess
+            continue  
 
         source_number = fault_sources[0]
         source_text = sources.get(source_number)
@@ -366,14 +292,8 @@ def _validate_multi_fault_answer(fault_bullets, action_bullets, sources):
                 )
 
     if not any_checked:
-        return None  # couldn't confidently validate — caller falls back
-
+        return None  
     return {"ok": len(problems) == 0, "problems": problems}
-
-
-# =========================================================
-# Grounding validation
-# =========================================================
 
 NO_MATCH_PHRASES = [
     "no malfunction in the provided manual evidence",
@@ -391,15 +311,12 @@ NO_MATCH_PHRASES = [
 ]
 
 NO_MATCH_REGEXES = [
-    # "no specific troubleshooting entry", "no single malfunction", "no match" ...
     r"\bno (specific |single |direct |matching )?(\w+ )?(malfunction|fault|entry|entries|match)",
     r"\b(does|do) not (directly )?(contain|describe|match|specify|provide)",
-    # "corrective action is not provided", "is not documented" ...
     r"\b(is|are) not (provided|described|documented|listed|specified)",
     r"\b(too|is) (general|broad|vague)",
     r"\bnot (sufficiently|closely) ",
 ]
-
 
 def declares_no_match(text):
     t = compact(text)
@@ -407,6 +324,24 @@ def declares_no_match(text):
         any(p in t for p in NO_MATCH_PHRASES)
         or any(re.search(p, t) for p in NO_MATCH_REGEXES)
     )
+def validate_listed_entries(answer, sources):
+    problems = []
+    for bullet in re.findall(r"(?m)^\s*[-*•]\s*(.+)$", str(answer or "")):
+        nums = extract_source_numbers(bullet)
+        if len(nums) != 1:
+            continue
+        src = sources.get(nums[0], "")
+        if re.search(r"(?i)\bmalfunction\s*:", bullet) and not re.search(r"(?i)\bmalfunction\s*:", src):
+            problems.append(f"SOURCE {nums[0]} is not a Malfunction/Action entry but was presented as one.")
+        clean = re.sub(r"\(\s*source\s+\d+[^)]*\)", "", bullet, flags=re.I)
+        for sent in re.split(r"(?<=[.;])\s+", clean):
+            sent = sent.strip()
+            core = sent.strip("., ")
+            if core.startswith("...") or (core.startswith("(") and core.endswith(")")):
+                continue
+            if len(content_words(sent)) >= 5 and word_overlap(sent, src) < 0.4:
+                problems.append(f"Possibly invented sentence (SOURCE {nums[0]}): {sent.strip()[:90]}")
+    return problems
 
 def validate_matching_fault_action(query, answer, context):
     """
@@ -419,14 +354,14 @@ def validate_matching_fault_action(query, answer, context):
     sections = extract_answer_sections(answer)
     matching_fault = sections["matching_fault"]
     manual_action = sections["manual_action"]
-
+    label_re = re.compile(r"(?i)\b(?:malfunction|action)\s*:\s*")
+    matching_fault = label_re.sub("", matching_fault)
+    manual_action = label_re.sub("", manual_action)
     problems = []
 
-    # ---- Explicit "no match found" refusal: nothing to ground. ----
     if declares_no_match(matching_fault):
         return {"ok": True, "problems": [], "matching_fault_source": None}
 
-    # ---- Multi-fault answer (Rule 6c): validate bullet by bullet. ----
     fault_sources_mentioned = set(extract_source_numbers(matching_fault))
     if len(fault_sources_mentioned) > 1:
         fault_bullets = _split_bulleted_segments(matching_fault)
@@ -438,16 +373,11 @@ def validate_matching_fault_action(query, answer, context):
                 "problems": multi_result["problems"],
                 "matching_fault_source": None,
             }
-        # else: bullets weren't clearly per-source — fall through to
-        # the single-block check below as a best-effort fallback.
 
     if not matching_fault:
         return {"ok": False, "problems": ["No explicit Matching fault section found."]}
-
     fault_clean = re.sub(r"\(\s*source\s+\d+[^)]*\)", "", matching_fault, flags=re.IGNORECASE)
     action_sources = extract_source_numbers(manual_action)
-
-    # ---- Is the matching fault itself grounded? ----
     matching_fault_supported = False
     matching_fault_source = None
 
@@ -463,8 +393,6 @@ def validate_matching_fault_action(query, answer, context):
         if matching_fault_supported:
             break
 
-    # Fallback: no structured pairs found — check raw word overlap
-    # against the whole retrieved context instead.
     if not matching_fault_supported:
         all_context = " ".join(sources.values())
         fault_words = content_words(fault_clean)
@@ -475,7 +403,6 @@ def validate_matching_fault_action(query, answer, context):
     if not matching_fault_supported:
         problems.append("Matching fault is not sufficiently grounded in the retrieved manual evidence.")
 
-    # ---- Is the manual action grounded, and attached to the right fault? ----
     if manual_action:
         missing_action_phrases = [
             "detailed corrective action is not provided",
@@ -489,7 +416,6 @@ def validate_matching_fault_action(query, answer, context):
         if not declares_missing:
             if not action_sources and matching_fault_source is not None:
                 action_sources = [matching_fault_source]
-
             action_supported = False
             wrong_malfunction_action = False
 
@@ -497,7 +423,6 @@ def validate_matching_fault_action(query, answer, context):
                 source_text = sources.get(source_number)
                 if source_text is None:
                     continue
-
                 pairs = extract_malfunction_action_pairs(source_text)
 
                 if not pairs:
@@ -506,7 +431,6 @@ def validate_matching_fault_action(query, answer, context):
                         break
                     continue
 
-                # Does the action belong to the matching malfunction?
                 for pair in pairs:
                     if (
                         word_overlap(fault_clean, pair["malfunction"]) >= 0.50
@@ -518,7 +442,6 @@ def validate_matching_fault_action(query, answer, context):
                 if action_supported:
                     break
 
-                # Does the action actually belong to a DIFFERENT malfunction?
                 for pair in pairs:
                     if pair["action"] and action_supported_by_source(manual_action, pair["action"]):
                         if word_overlap(fault_clean, pair["malfunction"]) < 0.50:
@@ -532,9 +455,6 @@ def validate_matching_fault_action(query, answer, context):
                 if wrong_malfunction_action:
                     break
 
-            # Fallback: action's supporting text may be split across the
-            # cited source and neighboring context — check the full
-            # retrieved context before giving up.
             if not action_supported and not wrong_malfunction_action:
                 all_context = " ".join(sources.values())
                 if word_overlap(manual_action, all_context) >= 0.60:
@@ -545,9 +465,7 @@ def validate_matching_fault_action(query, answer, context):
                     "Manual action is not sufficiently grounded in the "
                     "retrieved evidence for the matching fault."
                 )
-
     return {"ok": len(problems) == 0, "problems": problems, "matching_fault_source": matching_fault_source}
-
 
 def validate_answer_grounding(query, answer, context):
     """Run all grounding checks: SOURCE hallucination + fault/action grounding."""
@@ -559,18 +477,13 @@ def validate_answer_grounding(query, answer, context):
         cited = ", ".join(f"SOURCE {n}" for n in source_check["invalid_sources"])
         problems.append(f"Hallucinated SOURCE number(s): {cited}")
     problems.extend(fault_action_check["problems"])
-
+    problems.extend(validate_listed_entries(answer, parse_sources(context)))
     return {
         "ok": len(problems) == 0,
         "problems": problems,
         "source_check": source_check,
         "fault_action_check": fault_action_check,
     }
-
-
-# =========================================================
-# Retrieval evaluation
-# =========================================================
 
 def evaluate_retrieval():
     total = len(TEST_CASES)
@@ -579,7 +492,6 @@ def evaluate_retrieval():
     error_code_correct = 0
     error_tests = sum(1 for c in TEST_CASES if c.get("expected_error_code"))
     results = []
-
     print()
     print("=" * 80)
     print("Medix RETRIEVAL EVALUATION")
@@ -588,12 +500,10 @@ def evaluate_retrieval():
     for index, case in enumerate(TEST_CASES, start=1):
         print(f"\n[{index}/{total}] {case['name']}")
         print(f"Query: {case['query']}")
-
         result = retrieve(query=case["query"], top_k=8)
         actual_type = result.get("retrieval_type")
         actual_device = result.get("detected_device")
         actual_error = result.get("detected_error_code")
-
         type_ok = actual_type == case["expected_type"]
         device_ok = actual_device == case["expected_device"]
         error_ok = True
@@ -602,10 +512,8 @@ def evaluate_retrieval():
             error_ok = str(actual_error) == str(case["expected_error_code"])
             if error_ok:
                 error_code_correct += 1
-
         type_correct += type_ok
         device_correct += device_ok
-
         print(f"Expected type : {case['expected_type']}")
         print(f"Actual type   : {actual_type}")
         print(f"Expected device: {case['expected_device']}")
@@ -615,10 +523,8 @@ def evaluate_retrieval():
             print(f"Expected error: {case['expected_error_code']}")
             print(f"Actual error  : {actual_error}")
             print(f"Error code: {'PASS' if error_ok else 'FAIL'}")
-
-        print(f"Type: {'PASS' if type_ok else 'FAIL'}")
-        print(f"Device: {'PASS' if device_ok else 'FAIL'}")
-
+            print(f"Type: {'PASS' if type_ok else 'FAIL'}")
+            print(f"Device: {'PASS' if device_ok else 'FAIL'}")
         results.append({"name": case["name"], "query": case["query"], "result": result})
 
     print()
@@ -631,13 +537,7 @@ def evaluate_retrieval():
     if error_tests:
         print(f"Error-code accuracy: {error_code_correct / error_tests * 100:.1f}%")
     print("=" * 80)
-
     return results
-
-
-# =========================================================
-# Answer evaluation
-# =========================================================
 
 def evaluate_answers():
     print()
@@ -655,10 +555,6 @@ def evaluate_answers():
     for index, case in enumerate(TEST_CASES, start=1):
         print(f"\n[{index}/{len(TEST_CASES)}] {case['name']}")
 
-        # ---- Negative-test short-circuit ----
-        # Only negative tests call retrieve() here. For every other
-        # case answer_query() already runs retrieval itself, and doing
-        # it twice doubled the HyDE calls and triggered rate limits.
         if case["expected_type"] == "not_found":
             result = retrieve(query=case["query"], top_k=5)
             if result.get("retrieval_type") == "not_found":
@@ -671,30 +567,18 @@ def evaluate_answers():
                 action_grounding_correct += 1
                 continue
 
-        # Import RAG only when an actual answer needs to be generated.
         from rag import answer_query
-
         rag_result = answer_query(query=case["query"], top_k=8)
-
-        # Give Groq's tokens-per-minute limit a chance to reset before
-        # the next LLM call.
         time.sleep(LLM_CALL_DELAY_SECONDS)
-
         context = rag_result.get("context", "")
         answer = rag_result.get("answer", "")
-
-        # An LLM/API failure is not an answer-quality failure:
-        # skip it instead of counting it against the accuracy numbers.
         if answer.startswith(LLM_FAILURE_PREFIX):
             print("LLM call failed (rate limit / empty response) — SKIPPED, not counted.")
             skipped += 1
             continue
-
         print("\nContext sent to LLM:")
         print("\nContext sent to LLM:")
 
-        # Full un-truncated list of every SOURCE's page/section, so
-        # nothing is hidden by the character-limited preview below.
         import re as _re
         headers = _re.findall(
             r"SOURCE (\d+)\nDevice: (.*?)\nPage: (.*?)\nSection: (.*?)\n",
@@ -703,31 +587,26 @@ def evaluate_answers():
         print("All retrieved sources (page/section):")
         for source_num, device, page, section in headers:
             print(f"  SOURCE {source_num}: Page {page}, Section: {section}")
-
         print(context[:5000])
         print("-" * 80)
 
-        # ---- 1. Expected fact check ----
         ok, missing = contains_expected_terms(answer, case.get("expected_answer_terms", []))
         answer_total += 1
         answer_correct += ok
-
         print(f"Expected-term check: {'PASS' if ok else 'FAIL'}")
         if missing:
             print("Missing expected terms:", ", ".join(missing))
 
-        # ---- 2 & 3. Grounding checks ----
         grounding = validate_answer_grounding(query=case["query"], answer=answer, context=context)
         source_check = grounding["source_check"]
         fault_action_check = grounding["fault_action_check"]
-
         source_correct += source_check["ok"]
         action_grounding_correct += fault_action_check["ok"]
         grounding_correct += grounding["ok"]
-
         print(f"\nSOURCE grounding: {'PASS' if source_check['ok'] else 'FAIL'}")
         print("Available SOURCES:", source_check["available_sources"] or "NONE")
         print("Cited SOURCES:", source_check["cited_sources"] or "NONE")
+
         if source_check["invalid_sources"]:
             hallucinated = ", ".join(f"SOURCE {n}" for n in source_check["invalid_sources"])
             print("HALLUCINATED SOURCES:", hallucinated)
@@ -741,16 +620,14 @@ def evaluate_answers():
             print("\nGrounding problems:")
             for problem in grounding["problems"]:
                 print(f"  - {problem}")
-
-        print("\nAnswer:")
-        print(answer)
-        print("\n" + "=" * 80)
-
-    print()
-    print("=" * 80)
-    print("ANSWER SUMMARY")
-    print("=" * 80)
-    print(f"Evaluated answers: {answer_total}")
+                print("\nAnswer:")
+                print(answer)
+                print("\n" + "=" * 80)
+                print()
+                print("=" * 80)
+                print("ANSWER SUMMARY")
+                print("=" * 80)
+                print(f"Evaluated answers: {answer_total}")
     if skipped:
         print(f"Skipped (LLM call failed): {skipped}")
 
@@ -759,17 +636,10 @@ def evaluate_answers():
         print(f"SOURCE grounding accuracy: {source_correct / answer_total * 100:.1f}%")
         print(f"Malfunction/action grounding accuracy: {action_grounding_correct / answer_total * 100:.1f}%")
         print(f"Overall hallucination-free answers: {grounding_correct / answer_total * 100:.1f}%")
-
-    print("=" * 80)
-
-
-# =========================================================
-# Main
-# =========================================================
+        print("=" * 80)
 
 if __name__ == "__main__":
     evaluate_retrieval()
-
     choice = input("\nRun LLM answer evaluation? (y/n): ").strip().lower()
     if choice == "y":
         evaluate_answers()

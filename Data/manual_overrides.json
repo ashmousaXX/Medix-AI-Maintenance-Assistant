@@ -1,0 +1,9 @@
+[
+  {
+    "device_id": "servo_ventilator",
+    "page": 41,
+    "section": "Troubleshooting",
+    "malfunction": "Internal voltage supply failure: one or more of the regulated supply voltages (+24V, +5V, +15V) fails. An alarm is activated immediately.",
+    "action": "Check the transformer fuses (external fuse holder, and three internal thermal fuses). If a voltage is still missing after checking fuses, the fault is in the voltage supply unit (PC board no 10) and requires service."
+  }
+]

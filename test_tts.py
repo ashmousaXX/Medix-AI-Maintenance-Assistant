@@ -4,7 +4,6 @@ from groq import Groq
 
 load_dotenv(override=True)
 api_key = os.getenv("GROQ_API_KEY")
-
 if not api_key:
     raise RuntimeError("GROQ_API_KEY was not found in .env")
 client = Groq(api_key=api_key)
@@ -15,10 +14,6 @@ OUTPUT_PATH = "test_tts.wav"
 
 
 def generate_speech(text,output_path=OUTPUT_PATH,):
-    """
-    Convert English text to speech
-    using Groq Orpheus TTS.
-    """
     text = text.strip()
     if not text:
         raise ValueError("Text cannot be empty.")
@@ -30,10 +25,7 @@ def generate_speech(text,output_path=OUTPUT_PATH,):
         input=text,
         response_format="wav",
     )
-    response.write_to_file(
-        output_path
-    )
-
+    response.write_to_file(output_path)
     print(
         f"Saved: "
         f"{os.path.abspath(output_path)}"

@@ -5,7 +5,7 @@ import pymupdf
 import pdfplumber
 import pytesseract
 from PIL import Image
-from config import (MANUALS,MANUALS_DIR,PROCESSED_DIR,)
+from config import (MANUALS, MANUALS_DIR, PROCESSED_DIR,)
 import os
 import shutil
 
@@ -25,9 +25,6 @@ else:
     )
 
 def clean_text(text):
-    """
-    Basic cleanup for extracted PDF text.
-    """
     if not text:
         return ""
     text = text.replace("\u00ad", "")
@@ -35,26 +32,19 @@ def clean_text(text):
     return text.strip()
 
 def clean_cell(value):
-    """
-    Clean a PDF table cell.
-    """
     if value is None:
         return ""
-
     value = str(value).replace("\n", " ")
     value = re.sub(r"\s+", " ", value)
-    value = re.sub(r"\bpage(\d)",r"page \1", value,flags=re.IGNORECASE,)
+    value = re.sub(r"\bpage(\d)", r"page \1", value, flags=re.IGNORECASE,)
     return value.strip()
 
 def fix_medical_terms(text):
-    """
-    Normalize common medical terms.
-    """
     if not text:
         return ""
-    text = re.sub( r"\bSpO\s+2\b","SpO2",text,flags=re.IGNORECASE,)
-    text = re.sub(r"\betCO\s+2\b","etCO2",text,flags=re.IGNORECASE,)
-    text = re.sub(r"\bCO\s+2\b","CO2",text,flags=re.IGNORECASE,)
+    text = re.sub(r"\bSpO\s+2\b", "SpO2", text, flags=re.IGNORECASE,)
+    text = re.sub(r"\betCO\s+2\b", "etCO2", text, flags=re.IGNORECASE,)
+    text = re.sub(r"\bCO\s+2\b", "CO2", text, flags=re.IGNORECASE,)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
@@ -66,46 +56,14 @@ ERROR_CODE_FALSE_POSITIVE_CONTEXT = {
     "manual", "chart", "diagram", "row", "column", "col",
 }
 
-
 def _is_false_positive_context(text, match_start):
-    """
-    Look at the word immediately before a candidate error-code match
-    and reject the match if that word is a known false-positive
-    trigger (a page/section/figure/table reference, etc.) rather than
-    genuine error-code language.
-    """
     preceding = text[:match_start].strip().split()
     if not preceding:
         return False
     context_word = preceding[-1].lower().strip(".,:;()[]-")
     return context_word in ERROR_CODE_FALSE_POSITIVE_CONTEXT
 
-
 def detect_error_code(text):
-    """
-    Detect common medical-device error formats.
-    Examples:
-        E37
-        E-37
-        ERR37
-        Error 37
-        Error code 37
-        Fault 37
-        Fault code 37
-
-    The current retrieval.py expects the numeric part.
-
-    Deliberately narrower than a naive "any number near the word
-    code" match: across a multi-device, multi-manual corpus, a loose
-    bare "code \\d+" pattern false-positives constantly on page
-    numbers, section numbers, figure numbers, etc., and those false
-    positives get indexed as real error_code metadata -- which then
-    lets exact_error_search() in retrieval.py return the wrong
-    device's chunk for an unrelated query. This version drops the
-    bare "code" pattern entirely (requiring "error"/"fault"
-    specifically) and rejects any match immediately preceded by a
-    reference-style word (see ERROR_CODE_FALSE_POSITIVE_CONTEXT).
-    """
     patterns = [
         r"\berror\s+code\s*[:#]?\s*(\d{1,5})\b",
         r"\bfault\s+code\s*[:#]?\s*(\d{1,5})\b",
@@ -126,13 +84,10 @@ def detect_error_code(text):
     return None
 
 def detect_chunk_type(text):
-    """
-    Assign a simple chunk type.
-    """
     upper_text = text.upper()
     if any(
         term in upper_text
-        for term in [ "DANGER","WARNING","CAUTION", ]
+        for term in ["DANGER", "WARNING", "CAUTION", ]
     ):
         return "safety"
     if detect_error_code(text) is not None:
@@ -140,17 +95,9 @@ def detect_chunk_type(text):
     return "text"
 
 def extract_with_pymupdf(pdf_path):
-    """
-    Try to extract text from all pages using PyMuPDF.
-
-    Returns:
-        list[dict]
-    """
     pages = []
     try:
-        document = pymupdf.open(
-            pdf_path
-        )
+        document = pymupdf.open(pdf_path)
         for page_number, page in enumerate(
             document,
             start=1,
@@ -174,28 +121,19 @@ def extract_with_pymupdf(pdf_path):
         document.close()
 
     except Exception as error:
-        print(
-            f"    PyMuPDF failed: {error}"
-        )
-
+        print(f" PyMuPDF failed: {error}")
         return []
     return pages
 
 def extract_with_pdfplumber(pdf_path):
-    """
-    Try to extract text from all pages using pdfplumber.
-
-    Returns:
-        list[dict]
-    """
     pages = []
     try:
         with pdfplumber.open(
             pdf_path
         ) as pdf:
-            for page_number, page in enumerate(pdf.pages,start=1,):
+            for page_number, page in enumerate(pdf.pages, start=1,):
                 try:
-                    text = (page.extract_text( x_tolerance=2,y_tolerance=2,)or "")
+                    text = (page.extract_text(x_tolerance=2, y_tolerance=2,) or "")
                 except Exception as error:
                     print(
                         f"    pdfplumber page "
@@ -213,35 +151,18 @@ def extract_with_pdfplumber(pdf_path):
         return []
     return pages
 
-# OCR 
+# OCR
 def extract_with_ocr(pdf_path):
-    """
-    OCR fallback.
-
-    Used only when normal text extraction fails.
-    """
     pages = []
     print("  Starting OCR fallback...")
-
     try:
-        document = pymupdf.open(
-            pdf_path
-        )
-        for page_number, page in enumerate(document,start=1,):
+        document = pymupdf.open(pdf_path)
+        for page_number, page in enumerate(document, start=1,):
             try:
-                pix = page.get_pixmap(
-                    matrix=pymupdf.Matrix(
-                        2.0,
-                        2.0,
-                    ),
-                    alpha=False,
-                )
+                pix = page.get_pixmap( matrix=pymupdf.Matrix(2.0,2.0,),alpha=False,)
                 image = Image.frombytes(
                     "RGB",
-                    (
-                        pix.width,
-                        pix.height,
-                    ),
+                    ( pix.width, pix.height,),
                     pix.samples,
                 )
                 text = pytesseract.image_to_string(
@@ -250,19 +171,16 @@ def extract_with_ocr(pdf_path):
                 ).strip()
             except Exception as error:
                 print(
-                    f"  OCR page "
+                    f" OCR page "
                     f"{page_number} error: {error}"
                 )
                 text = ""
             pages.append(
-                {
-                    "page": page_number,
-                    "text": text,
-                }
+                {"page": page_number,"text": text,}
             )
             if page_number % 10 == 0:
                 print(
-                    f"    OCR processed "
+                    f" OCR processed "
                     f"{page_number} pages..."
                 )
         document.close()
@@ -273,17 +191,6 @@ def extract_with_ocr(pdf_path):
     return pages
 
 def extract_pdf_text(pdf_path):
-    """
-    Unified PDF text extraction pipeline.
-
-    Order:
-        1. PyMuPDF
-        2. pdfplumber
-        3. OCR
-
-    The file is only passed to OCR when both normal
-    extraction methods return no usable text.
-    """
     print(f" Extracting: {pdf_path.name}")
     pages = extract_with_pymupdf(
         pdf_path
@@ -294,10 +201,9 @@ def extract_pdf_text(pdf_path):
     )
     if pymupdf_non_empty > 0:
         return pages
-    
     print("  No usable PyMuPDF text.")
     print("  Trying pdfplumber...")
-    
+
     pages = extract_with_pdfplumber(
         pdf_path
     )
@@ -314,9 +220,6 @@ def extract_pdf_text(pdf_path):
     return pages
 
 def load_device_inventory():
-    """
-    Load metadata generated by build_inventory.py.
-    """
     inventory_path = (
         MANUALS_DIR.parent
         / "device_inventory.json"
@@ -326,26 +229,12 @@ def load_device_inventory():
             f"Device inventory not found: "
             f"{inventory_path}"
         )
-    with open(inventory_path,"r",encoding="utf-8",) as file:
+    with open(inventory_path, "r", encoding="utf-8",) as file:
         return json.load(file)
 
 def get_stable_device_info(pdf_path, device_info):
-    """
-    Keep stable device IDs for manuals that are referenced
-    directly by config.py.
-
-    The inventory uses automatically generated IDs, while
-    retrieval.py/rag.py use stable IDs such as:
-        servo_ventilator
-        sc6002xl
-        philips_g40
-
-    If a specialized manual exists in MANUALS, its stable
-    ID is used. Otherwise the inventory entry is unchanged.
-    """
-
     updated_info = dict(device_info)
-    for stable_id in ("servo_ventilator","sc6002xl","philips_g40",):
+    for stable_id in ("servo_ventilator", "sc6002xl", "philips_g40",):
         manual = MANUALS.get(stable_id)
         if not manual:
             continue
@@ -376,10 +265,7 @@ def make_generic_chunk(
     text,
     chunk_number,
 ):
-    """
-    Create a chunk compatible with retrieval.py.
-    """
-    text = fix_medical_terms( text)
+    text = fix_medical_terms(text)
     return {
         "chunk_id":
             f"{device_info['device_id']}"
@@ -408,28 +294,16 @@ def make_generic_chunk(
         "text":
             text,
     }
-
+DEPENDENT_START = re.compile(
+    r"^(if (it|they|not|so|off|on)\b|it\b|they\b|this\b|these\b|then\b|otherwise\b|else\b)",
+    re.IGNORECASE,
+)
 def extract_generic_chunks(
     pdf_path,
     device_info,
     pages=None,
     exclude_pages=None,
 ):
-    """
-    Generic fallback parser.
-
-    If pages are provided, reuse them.
-    This avoids re-reading OCR PDFs.
-
-    exclude_pages: optional set/collection of page numbers to skip
-    entirely. Used to avoid double-chunking pages that a specialized
-    parser (e.g. the Servo malfunction/action troubleshooting parser)
-    has already turned into focused, fault-aware chunks -- without
-    this, the same troubleshooting content ends up indexed twice: once
-    as a tight, well-scoped chunk and once again as a diluted generic
-    chunk, and the two compete against each other in retrieval for no
-    benefit.
-    """
     if pages is None:
         pages = extract_pdf_text(
             pdf_path
@@ -441,10 +315,8 @@ def extract_generic_chunks(
             for page_data in pages
             if page_data["page"] not in exclude_pages
         ]
-
     chunks = []
     max_chars = 1200
-
     for page_data in pages:
         page_number = page_data["page"]
         raw_text = page_data["text"]
@@ -456,23 +328,17 @@ def extract_generic_chunks(
         )
         if not text:
             continue
-        
-        parts = re.split(r"(?<=[.!?])\s+",text,)
+        parts = re.split(r"(?<=[.!?])\s+", text)
         current_chunk = ""
+        last_part = ""
         chunk_number = 0
         for part in parts:
             part = part.strip()
             if not part:
                 continue
-            candidate_length = (
-                len(current_chunk)
-                + len(part)
-                + 1
-            )
-            if candidate_length <= max_chars:
-                if current_chunk:
-                    current_chunk += " "
-                current_chunk += part
+            if len(current_chunk) + len(part) + 1 <= max_chars:
+                current_chunk = f"{current_chunk} {part}".strip()
+                last_part = part
             else:
                 if current_chunk:
                     chunk_number += 1
@@ -485,7 +351,13 @@ def extract_generic_chunks(
                             chunk_number=chunk_number,
                         )
                     )
-                current_chunk = part
+                carry = (
+                    last_part
+                    if DEPENDENT_START.match(part) and 0 < len(last_part) <= 300
+                    else ""
+                )
+                current_chunk = f"{carry} {part}".strip()
+                last_part = part
 
         if current_chunk:
             chunk_number += 1
@@ -500,10 +372,7 @@ def extract_generic_chunks(
             )
     return chunks
 
-def extract_servo_error_chunks( pages,manual,):
-    """
-    Specialized parser for Servo technical error codes.
-    """
+def extract_servo_error_chunks(pages, manual,):
     chunks = []
     inside_error_table = False
     for page in pages:
@@ -542,7 +411,7 @@ def extract_servo_error_chunks( pages,manual,):
             $
         )
         """
-        matches = list(re.finditer(pattern,text,re.VERBOSE,))
+        matches = list(re.finditer(pattern, text, re.VERBOSE,))
         for index, match in enumerate(
             matches
         ):
@@ -553,7 +422,7 @@ def extract_servo_error_chunks( pages,manual,):
             if error_code == "382":
                 continue
             error_message = (match.group(2).strip())
-            error_message = re.sub(r"_\s+","_",error_message,)
+            error_message = re.sub(r"_\s+", "_", error_message,)
             start = match.end()
 
             if index + 1 < len(matches):
@@ -561,7 +430,7 @@ def extract_servo_error_chunks( pages,manual,):
             else:
                 end = len(text)
             action_text = (text[start:end].strip())
-            action_text = re.sub(r"^Recommended action\s*", "" , action_text,flags=re.IGNORECASE,)
+            action_text = re.sub(r"^Recommended action\s*", "", action_text, flags=re.IGNORECASE,)
             chunk_text = (
                 f"Error code: {error_code}. "
                 f"Error message / possible cause: "
@@ -598,39 +467,8 @@ def extract_servo_error_chunks( pages,manual,):
     return chunks
 
 def extract_servo_malfunction_action_chunks(pages, manual):
-    """
-    Specialized parser for the Servo Ventilator's "Malfunction / Action"
-    troubleshooting table.
-
-    Verified directly against the OCR output: this manual (Servo
-    Ventilator 900 C/D/E, 1994 edition) has NO numbered error codes
-    anywhere -- "error code", "technical error", and "recommended action"
-    do not appear in the document at all. Troubleshooting is instead a
-    two-column table: a "Malfunction" heading followed by a list of
-    symptom descriptions, then an "Action" heading followed by the
-    matching list of fixes, in the same order.
-
-    Because this document is a scanned image (OCR-only, no selectable
-    table structure), the two columns can only be recovered by counting
-    entries. When both columns have the same number of entries, pairing
-    them by position is reliable and used directly. When counts don't
-    match (OCR occasionally splits one long action into two paragraphs),
-    precise pairing isn't safe, so the whole page's malfunctions and
-    actions are kept together as one combined chunk instead of risking
-    an incorrect malfunction-to-action link.
-
-    Returns:
-        chunks: list[dict] -- the fault-aware troubleshooting chunks
-        pages_used: set[int] -- page numbers that were successfully
-            parsed into a Malfunction/Action chunk. Callers should
-            exclude these pages from the generic fallback parser to
-            avoid indexing the same troubleshooting content twice
-            (once here as a focused chunk, once again as a diluted
-            generic chunk that competes with it in retrieval).
-    """
     chunks = []
     pages_used = set()
-
     for page in pages:
         page_number = page["page"]
         raw_text = page["text"]
@@ -650,15 +488,12 @@ def extract_servo_malfunction_action_chunks(pages, manual):
                 and action_idx is None
             ):
                 action_idx = i
-
         if malfunction_idx is None or action_idx is None:
             continue
-
         malfunction_block = "\n".join(
-            lines[malfunction_idx + 1 : action_idx]
+            lines[malfunction_idx + 1: action_idx]
         ).strip()
-        action_block = "\n".join(lines[action_idx + 1 :]).strip()
-
+        action_block = "\n".join(lines[action_idx + 1:]).strip()
         if not malfunction_block or not action_block:
             continue
 
@@ -675,20 +510,17 @@ def extract_servo_malfunction_action_chunks(pages, manual):
                     continue
                 entries.append(entry)
             return entries
-        
+
         malfunctions = split_entries(malfunction_block)
         actions = split_entries(action_block)
-
         if not malfunctions or not actions:
             continue
 
         pages_used.add(page_number)
-
         if len(malfunctions) == len(actions):
             for malfunction, action in zip(malfunctions, actions):
                 malfunction_clean = fix_medical_terms(malfunction)
                 action_clean = fix_medical_terms(action)
-
                 chunks.append(
                     {
                         "device_id": "servo_ventilator",
@@ -711,45 +543,38 @@ def extract_servo_malfunction_action_chunks(pages, manual):
             print(
                 f"  NOTE: page {page_number} malfunction/action counts "
                 f"don't match ({len(malfunctions)} vs {len(actions)}); "
-                f"keeping this page's malfunctions and actions in one "
-                f"combined chunk instead of risking an incorrect "
-                f"malfunction-to-action link."
-                )
-    combined_malfunctions = " ".join(
-        fix_medical_terms(m) for m in malfunctions
-    )
-    combined_actions = " ".join(
-        fix_medical_terms(a) for a in actions
-    )
-    chunks.append(
-        {
-            "device_id": "servo_ventilator",
-            "device": manual["device"],
-            "manufacturer": manual["manufacturer"],
-            "page": page_number,
-            "section": "Troubleshooting",
-            "chunk_type": "troubleshooting",
-            "error_code": None,
-            "symptom": combined_malfunctions,
-            "action": combined_actions,
-            "manual": Path(manual["file"]).name,
-            "text": (
-                f"Malfunction: {combined_malfunctions} "
-                f"Action: {combined_actions}"
-            ),
-        }
-    )
+                f"keeping one combined chunk for this page instead of "
+                f"risking an incorrect malfunction-to-action link."
+            )
+            combined_malfunctions = " ".join(
+                fix_medical_terms(m) for m in malfunctions
+            )
+            combined_actions = " ".join(
+                fix_medical_terms(a) for a in actions
+            )
+            chunks.append(
+                {
+                    "device_id": "servo_ventilator",
+                    "device": manual["device"],
+                    "manufacturer": manual["manufacturer"],
+                    "page": page_number,
+                    "section": "Troubleshooting",
+                    "chunk_type": "troubleshooting",
+                    "error_code": None,
+                    "symptom": combined_malfunctions,
+                    "action": combined_actions,
+                    "manual": Path(manual["file"]).name,
+                    "text": (
+                        f"Malfunction: {combined_malfunctions} "
+                        f"Action: {combined_actions}"
+                    ),
+                }
+            )
     return chunks, pages_used
 
 def extract_philips_troubleshooting_chunks(
     manual,
 ):
-    """
-    Specialized Philips G30/G40 troubleshooting parser.
-    This parser is retained for the known G40 document.
-    If it returns zero chunks, build_all_chunks()
-    will use generic fallback.
-    """
     chunks = []
     current_symptom = None
     try:
@@ -859,7 +684,6 @@ def extract_philips_troubleshooting_chunks(
                                     chunk_text,
                             }
                         )
-
     except Exception as error:
         print(
             f"    Philips specialized parser "
@@ -867,12 +691,33 @@ def extract_philips_troubleshooting_chunks(
         )
     return chunks
 
-def extract_sc6002xl_troubleshooting_chunks(
-    manual,
-):
-    """
-    Specialized SC6002XL troubleshooting parser.
-    """
+_PLAIN_LANGUAGE_ALIASES = [
+    (
+        re.compile(r"areas of display missing|color contaminated", re.IGNORECASE),
+        "Also described as: part of the screen isn't showing anything, "
+        "or the screen colors look wrong. ",
+    ),
+    (
+        re.compile(r"backlight fails to provide", re.IGNORECASE),
+        "Also described as: the screen looks dim or dark. ",
+    ),
+    (
+        re.compile(r"inoperative pixels", re.IGNORECASE),
+        "Also described as: the screen has dead or stuck pixels. ",
+    ),
+    (
+        re.compile(r"NO power", re.IGNORECASE),
+        "Also described as: the monitor won't turn on. ",
+    ),
+]
+
+def _build_plain_language_alias(symptom_text):
+    for pattern, alias in _PLAIN_LANGUAGE_ALIASES:
+        if pattern.search(symptom_text):
+            return alias
+    return ""
+
+def extract_sc6002xl_troubleshooting_chunks( manual,):
     chunks = []
     try:
         with pdfplumber.open(
@@ -886,7 +731,7 @@ def extract_sc6002xl_troubleshooting_chunks(
                     continue
                 page = pdf.pages[page_number - 1]
                 tables = page.extract_tables()
-                
+
                 for table_number, table in enumerate(
                     tables,
                     start=1,
@@ -943,7 +788,7 @@ def extract_sc6002xl_troubleshooting_chunks(
                         symptom_lower = (symptom.lower())
                         if (
                             symptom_lower
-                            in ["conditions","symptom(s)", "symptoms",] and
+                            in ["conditions", "symptom(s)", "symptoms", ] and
                             "possible cause"
                             in cause.lower()
                         ):
@@ -951,9 +796,11 @@ def extract_sc6002xl_troubleshooting_chunks(
                         symptom = fix_medical_terms(symptom)
                         cause = fix_medical_terms(cause)
                         action = fix_medical_terms(action)
+                        plain_language_alias = _build_plain_language_alias(symptom)
                         chunk_text = (
                             f"Symptom or condition: "
                             f"{symptom}. "
+                            f"{plain_language_alias}"
                             f"Possible cause: "
                             f"{cause}. "
                             f"Troubleshooting and remedial action: "
@@ -995,13 +842,55 @@ def extract_sc6002xl_troubleshooting_chunks(
         )
     return chunks
 
-def build_all_chunks():
+def apply_manual_overrides(chunks):
+    path = MANUALS_DIR.parent / "manual_overrides.json"
+    if not path.exists():
+        return chunks
+    with open(path, "r", encoding="utf-8") as file:
+        overrides = json.load(file)
+    replaced = {(o["device_id"], o["page"]) for o in overrides}
+    kept = [
+        c for c in chunks
+        if not (
+            (c["device_id"], c["page"]) in replaced
+            and c.get("chunk_type") == "troubleshooting"
+        )
+    ]
+    applied = 0
+    for o in overrides:
+        meta = next(
+            (c for c in chunks if c["device_id"] == o["device_id"]),
+            None,
+        )
+        if meta is None:
+            print(
+                f"  WARNING: override for unknown device "
+                f"{o['device_id']} skipped."
+            )
+            continue
+        kept.append({
+            "device_id": o["device_id"],
+            "device": meta["device"],
+            "manufacturer": meta["manufacturer"],
+            "page": o["page"],
+            "section": o.get("section", "Troubleshooting"),
+            "chunk_type": "troubleshooting",
+            "error_code": None,
+            "manual": meta.get("manual", ""),
+            "text": (
+                f"Malfunction: {fix_medical_terms(o['malfunction'])} "
+                f"Action: {fix_medical_terms(o['action'])}"
+            ),
+        })
+        applied += 1
+    print(f"Applied {applied} manual override(s).")
+    return kept
 
+def build_all_chunks():
     all_chunks = []
     inventory = load_device_inventory()
     pdf_files = sorted(MANUALS_DIR.glob("*.pdf"))
     print(f"Found {len(pdf_files)} PDF files.")
-
     for index, pdf_path in enumerate(
         pdf_files,
         start=1,
@@ -1011,7 +900,6 @@ def build_all_chunks():
             f"[{index}/{len(pdf_files)}] "
             f"{pdf_path.name}"
         )
-
         device_info = inventory.get(pdf_path.name)
         if device_info is None:
             print(
@@ -1020,7 +908,7 @@ def build_all_chunks():
             )
             continue
 
-        device_info = get_stable_device_info(pdf_path,device_info,)
+        device_info = get_stable_device_info(pdf_path, device_info,)
         try:
             chunks = []
             if ("servo_ventilator" in MANUALS and pdf_path.name == Path(
@@ -1029,7 +917,7 @@ def build_all_chunks():
                     ]["file"]
                 ).name
             ):
-                print( "  Using Servo specialized parser...")
+                print("  Using Servo specialized parser...")
                 pages = extract_pdf_text(
                     pdf_path
                 )
@@ -1071,7 +959,7 @@ def build_all_chunks():
                     + malfunction_action_chunks
                     + generic_chunks
                 )
-            elif ( "philips_g40" in MANUALS and pdf_path.name ==
+            elif ("philips_g40" in MANUALS and pdf_path.name ==
                 Path(
                     MANUALS[
                         "philips_g40"
@@ -1104,7 +992,7 @@ def build_all_chunks():
                 )
                 chunks = specialized_chunks + generic_chunks
 
-            elif ( "sc6002xl" in MANUALS and pdf_path.name ==
+            elif ("sc6002xl" in MANUALS and pdf_path.name ==
                 Path(
                     MANUALS[
                         "sc6002xl"
@@ -1138,7 +1026,7 @@ def build_all_chunks():
                 chunks = specialized_chunks + generic_chunks
             else:
                 print("  Using generic parser...")
-                chunks = extract_generic_chunks(pdf_path,device_info,)
+                chunks = extract_generic_chunks(pdf_path, device_info,)
             all_chunks.extend(chunks)
             print(
                 f"  Chunks created: "
@@ -1150,7 +1038,9 @@ def build_all_chunks():
                 f"  ERROR while processing "
                 f"{pdf_path.name}: {error}"
             )
-    for index, chunk in enumerate(all_chunks,start=1,):
+    all_chunks = apply_manual_overrides(all_chunks)
+
+    for index, chunk in enumerate(all_chunks, start=1,):
         chunk["chunk_id"] = (
             f"chunk_{index:05d}"
         )
@@ -1176,7 +1066,6 @@ def validate_chunks(chunks):
     missing_field_count = 0
     empty_text_count = 0
     duplicate_ids = 0
-
     seen_ids = set()
     for chunk in chunks:
         for field in required_fields:
@@ -1199,7 +1088,7 @@ def validate_chunks(chunks):
 
         if chunk_id in seen_ids:
             duplicate_ids += 1
-        seen_ids.add( chunk_id)
+        seen_ids.add(chunk_id)
     print()
     print(
         f"Missing fields: "
@@ -1222,7 +1111,7 @@ def validate_chunks(chunks):
     ):
         print("Validation passed.")
     else:
-        print( "Validation found problems.")
+        print("Validation found problems.")
     print("=" * 70)
 
 def save_chunks_to_json(chunks):
@@ -1235,7 +1124,7 @@ def save_chunks_to_json(chunks):
         / "maintai_chunks.json"
     )
 
-    with open( output_file,"w",encoding="utf-8",) as file:
+    with open(output_file, "w", encoding="utf-8",) as file:
         json.dump(
             chunks,
             file,
@@ -1243,8 +1132,8 @@ def save_chunks_to_json(chunks):
             ensure_ascii=False,
         )
     print()
-    print( f"Saved {len(chunks)} chunks")
-    print( f"Output file: {output_file}")
+    print(f"Saved {len(chunks)} chunks")
+    print(f"Output file: {output_file}")
 
 def run_preprocessing():
     print("=" * 70)

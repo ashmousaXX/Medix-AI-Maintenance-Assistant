@@ -1,72 +1,67 @@
 import json
-import os
+import math
 import re
 import chromadb
-from dotenv import load_dotenv
 
-from groq import Groq
-from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
-from config import (
-    PROCESSED_DIR,
-    VECTOR_DB_DIR,
-)
-
-
-load_dotenv(override=True)
+from sentence_transformers import SentenceTransformer
+from config import (PROCESSED_DIR,VECTOR_DB_DIR,)
+from groq_client import chat, HYDE_MODELS, LLMUnavailable
 
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 COLLECTION_NAME = "maintai_manuals"
 MAX_DISTANCE = 0.5
 BM25_TOP_K = 20
-
-# Top-N BM25 hits are allowed to survive the distance filter, so a
-# strong keyword match (e.g. "voltage supply") is not thrown away just
-# because its embedding is far from the query.
 BM25_RESCUE_RANK = 3
 BM25_RESCUE_MAX_DISTANCE = 0.65
+PROBE_K = 12
+DEVICE_MARGIN = 0.035
+MAX_DEVICES_SEARCHED = 3
+
 embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+_collection = None
 
-HYDE_MODEL_NAME = "openai/gpt-oss-20b"
-_hyde_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+def get_collection():
+    global _collection
+    if _collection is None:
+        client = chromadb.PersistentClient(path=str(VECTOR_DB_DIR))
+        _collection = client.get_collection(name=COLLECTION_NAME)
+    return _collection
 
-
-# =========================================================
-# Query expansion
-# =========================================================
+def _reset_caches():
+    """Call after the vector DB is rebuilt."""
+    global _collection
+    _collection = None
+    _bm25_cache.clear()
+    _doc_embedding_cache.clear()
 
 SYNONYM_EXPANSIONS = {
     "power supply": "power supply voltage supply internal supply voltage",
     "power problem": "voltage supply mains power",
     "blank screen": "blank display no display",
+    "black screen": "blank display no display no picture dark screen",
+    "screen is black": "blank display no display no picture dark screen",
+    "display is black": "blank display no display no picture dark screen",
+    "no picture": "blank display no display",
+    "flow sensor": "flow transducer",
+    "broken": "defective malfunction",
+    "not working": "defective malfunction failure",
+    "gas pressure": "gas supply pressure inlet pressure too low too high",
 }
 
-
 def expand_query(query, device_id=None):
-    """
-    Appends manual-style synonyms to the query. device_id is accepted
-    (and currently unused) so callers can pass it without breaking.
-    """
     q = query.lower()
     extra = [v for k, v in SYNONYM_EXPANSIONS.items() if k in q]
     return query + (" " + " ".join(extra) if extra else "")
 
-
-# =========================================================
-# Vector DB helpers
-# =========================================================
-
 def get_available_devices():
-    client = chromadb.PersistentClient(path=str(VECTOR_DB_DIR))
-    collection = client.get_collection(name=COLLECTION_NAME)
-    data = collection.get()
+    data = get_collection().get()
     devices = set()
     for metadata in data["metadatas"]:
         device_id = metadata.get("device_id", "")
         if device_id:
             devices.add(device_id)
     return sorted(list(devices))
-
 
 def load_chunks():
     chunks_file = PROCESSED_DIR / "maintai_chunks.json"
@@ -76,7 +71,6 @@ def load_chunks():
     with open(chunks_file, "r", encoding="utf-8") as file:
         chunks = json.load(file)
     return chunks
-
 
 def create_vector_database():
     print("=" * 70)
@@ -146,11 +140,7 @@ def create_vector_database():
     print()
     print(f"Stored vectors: {collection.count()}")
     print("=" * 70)
-
-
-# =========================================================
-# Semantic search
-# =========================================================
+    _reset_caches()
 
 def semantic_search(
     query,
@@ -158,16 +148,8 @@ def semantic_search(
     top_k=8,
     expand=False,
 ):
-    """
-    expand=False by default: the device-detection probe and the HyDE
-    leg must see the query exactly as written. Synonym expansion is
-    only requested explicitly by hybrid_search for the raw-query leg.
-    """
-    client = chromadb.PersistentClient(path=str(VECTOR_DB_DIR))
-    collection = client.get_collection(name=COLLECTION_NAME)
-
+    collection = get_collection()
     search_query = expand_query(query, device_id=device_id) if expand else query
-
     query_embedding = embedding_model.encode(
         search_query,
         normalize_embeddings=True,
@@ -179,96 +161,97 @@ def semantic_search(
 
     if device_id:
         search_arguments["where"] = {"device_id": device_id}
+    return collection.query(**search_arguments)
 
-    results = collection.query(**search_arguments)
-    return results
+_hyde_cache = {}
 
-
-# =========================================================
-# HyDE
-# =========================================================
+HYDE_SYSTEM_PROMPT = (
+    "Rewrite the user's symptom as a short technical phrase in the style "
+    "of a medical-equipment service manual's troubleshooting table. One "
+    "sentence. Keep every device and component word from the user's text "
+    "exactly as written; do not correct, replace or invent words. Do not "
+    "answer or solve anything, only rephrase."
+)
 
 def generate_hypothetical_passage(query):
+    key = query.strip().lower()
+    if key in _hyde_cache:
+        return _hyde_cache[key]
     try:
-        response = _hyde_client.chat.completions.create(
-            model=HYDE_MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Rewrite the user's symptom as a short technical "
-                        "phrase in the style of a medical-equipment service "
-                        "manual's troubleshooting table. One sentence. Do "
-                        "not answer or solve anything, only rephrase."
-                    ),
-                },
+        text, _model = chat(
+            [
+                {"role": "system", "content": HYDE_SYSTEM_PROMPT},
                 {"role": "user", "content": query},
             ],
-            temperature=0,  # deterministic: same query -> same rewrite
-            # gpt-oss models "think" first; a tiny limit could be spent
-            # entirely on reasoning and leave an empty answer.
-            max_completion_tokens=200,
-            reasoning_effort="low",
+            HYDE_MODELS,
+            max_tokens=200,
+            temperature=0,
+            label="hyde",
         )
-        rewritten = (response.choices[0].message.content or "").strip()
-        return rewritten if rewritten else query
-    except Exception as error:
-        print(f"  HyDE rewrite failed, using original query: {error}")
+    except LLMUnavailable as error:
+        print(f"  HyDE rewrite skipped, using original query: {error}")
         return query
 
+    text = text.strip().strip('"').strip()
+    if not text or len(text) > 300:
+        return query
 
-# =========================================================
-# BM25 keyword search
-# =========================================================
+    _hyde_cache[key] = text
+    return text
 
 _bm25_cache = {}
 
+_STOPWORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "has", "have", "had",
+    "my", "our", "your", "of", "to", "in", "on", "at", "it", "its", "and",
+    "or", "does", "do", "not", "no", "with", "for", "this", "that", "i",
+    "me", "we", "seems", "seem", "problem",
+}
+
+def _tokens(text):
+    return [
+        t for t in re.findall(r"[a-z0-9]+", text.lower())
+        if t not in _STOPWORDS
+    ]
 
 def _get_bm25_index(device_id):
     if device_id in _bm25_cache:
         return _bm25_cache[device_id]
-    client = chromadb.PersistentClient(path=str(VECTOR_DB_DIR))
-    collection = client.get_collection(name=COLLECTION_NAME)
-    data = collection.get(where={"device_id": device_id})
 
-    ids = data["ids"]
+    data = get_collection().get(where={"device_id": device_id})
     texts = data["documents"]
-    metadatas = data["metadatas"]
-    tokenized_corpus = [
-        re.findall(r"[a-z0-9]+", text.lower())
-        for text in texts
-    ]
-
-    bm25 = BM25Okapi(tokenized_corpus)
+    if not texts:
+        _bm25_cache[device_id] = None
+        return None
     entry = {
-        "bm25": bm25,
-        "ids": ids,
+        "bm25": BM25Okapi([_tokens(text) or ["_"] for text in texts]),
+        "ids": data["ids"],
         "texts": texts,
-        "metadatas": metadatas,
+        "metadatas": data["metadatas"],
     }
     _bm25_cache[device_id] = entry
     return entry
-
 
 def keyword_search(
     query,
     device_id,
     top_k=BM25_TOP_K,
 ):
+    empty = {"ids": [], "documents": [], "metadatas": [], "scores": []}
     index = _get_bm25_index(device_id)
-    # BM25 benefits the most from synonym expansion
-    # (e.g. "power supply" -> "voltage supply").
-    tokenized_query = re.findall(
-        r"[a-z0-9]+",
-        expand_query(query).lower(),
-    )
+    if index is None:
+        return empty
+
+    tokenized_query = _tokens(expand_query(query))
+    if not tokenized_query:
+        return empty
+
     scores = index["bm25"].get_scores(tokenized_query)
     ranked_positions = sorted(
         range(len(scores)),
         key=lambda i: scores[i],
         reverse=True,
     )
-
     ranked_positions = [i for i in ranked_positions if scores[i] > 0][:top_k]
     return {
         "ids": [index["ids"][i] for i in ranked_positions],
@@ -276,14 +259,23 @@ def keyword_search(
         "metadatas": [index["metadatas"][i] for i in ranked_positions],
         "scores": [scores[i] for i in ranked_positions],
     }
+_doc_embedding_cache = {}
 
-
-# =========================================================
-# Hybrid search
-#   legs: raw query (expanded) + HyDE rewrite + BM25, fused with RRF
-#   distance gate: min(distance to raw query, distance to HyDE query)
-#   -> HyDE can only help a chunk pass, never make it fail.
-# =========================================================
+def _embed_docs(ids, documents):
+    missing = [
+        (doc_id, doc)
+        for doc_id, doc in zip(ids, documents)
+        if doc_id not in _doc_embedding_cache
+    ]
+    if missing:
+        vectors = embedding_model.encode(
+            [doc for _, doc in missing],
+            normalize_embeddings=True,
+            batch_size=32,
+        )
+        for (doc_id, _), vector in zip(missing, vectors):
+            _doc_embedding_cache[doc_id] = vector
+    return [_doc_embedding_cache[doc_id] for doc_id in ids]
 
 def hybrid_search(
     query,
@@ -293,18 +285,14 @@ def hybrid_search(
 ):
     if hyde_query is None:
         hyde_query = generate_hypothetical_passage(query)
-
     use_hyde = bool(hyde_query) and hyde_query.strip() != query.strip()
-
     semantic_top_k = max(top_k * 3, 24)
-
     empty_result = {
         "ids": [[]],
         "documents": [[]],
         "metadatas": [[]],
         "distances": [[]],
     }
-
     candidates = {}
 
     def _get(doc_id, document, metadata):
@@ -320,8 +308,6 @@ def hybrid_search(
                 "dist_hyde": None,
             }
         return candidates[doc_id]
-
-    # ---- Leg 1: raw query (with synonym expansion) ----
     query_results = semantic_search(
         query=query,
         device_id=device_id,
@@ -338,7 +324,6 @@ def hybrid_search(
     ):
         _get(doc_id, doc, meta)["query_rank"] = rank
 
-    # ---- Leg 2: HyDE rewrite ----
     if use_hyde:
         hyde_results = semantic_search(
             query=hyde_query,
@@ -356,7 +341,6 @@ def hybrid_search(
         ):
             _get(doc_id, doc, meta)["hyde_rank"] = rank
 
-    # ---- Leg 3: BM25 ----
     keyword_results = keyword_search(
         query=query,
         device_id=device_id,
@@ -375,14 +359,10 @@ def hybrid_search(
     if not candidates:
         return empty_result
 
-    # ---- Uniform distances for every candidate ----
-    # Always measured against the ORIGINAL (un-expanded) query, and
-    # against the HyDE rewrite when it exists.
     candidate_list = list(candidates.values())
-    doc_embeddings = embedding_model.encode(
+    doc_embeddings = _embed_docs(
+        [c["id"] for c in candidate_list],
         [c["document"] for c in candidate_list],
-        normalize_embeddings=True,
-        batch_size=32,
     )
     query_embedding = embedding_model.encode(query, normalize_embeddings=True)
     hyde_embedding = (
@@ -390,19 +370,16 @@ def hybrid_search(
         if use_hyde
         else None
     )
-
     for candidate, doc_embedding in zip(candidate_list, doc_embeddings):
         candidate["dist_query"] = float(1.0 - (doc_embedding @ query_embedding))
         if hyde_embedding is not None:
             candidate["dist_hyde"] = float(1.0 - (doc_embedding @ hyde_embedding))
-
         distances = [
             d for d in (candidate["dist_query"], candidate["dist_hyde"])
             if d is not None
         ]
         candidate["semantic_distance"] = min(distances)
 
-    # ---- Distance filter (+ BM25 rescue) ----
     filtered_candidates = [
         c for c in candidate_list
         if c["semantic_distance"] <= MAX_DISTANCE
@@ -412,11 +389,9 @@ def hybrid_search(
             and c["semantic_distance"] <= BM25_RESCUE_MAX_DISTANCE
         )
     ]
-
     if not filtered_candidates:
         return empty_result
 
-    # ---- Reciprocal Rank Fusion ----
     RRF_K = 60
     QUERY_WEIGHT = 1.5
     HYDE_WEIGHT = 1.0
@@ -431,13 +406,11 @@ def hybrid_search(
         if candidate["bm25_rank"] is not None:
             score += BM25_WEIGHT / (RRF_K + candidate["bm25_rank"])
         candidate["rrf_score"] = score
-
     ranked_candidates = sorted(
         filtered_candidates,
         key=lambda item: (item["rrf_score"], -item["semantic_distance"]),
         reverse=True,
     )[:top_k]
-
     true_best_distance = min(
         c["semantic_distance"] for c in filtered_candidates
     )
@@ -450,20 +423,81 @@ def hybrid_search(
         "true_best_distance": true_best_distance,
     }
 
+def detect_candidate_devices(query):
+    probe = semantic_search(query=query, device_id=None, top_k=PROBE_K)
+    if not probe["documents"][0]:
+        return [], None, probe
 
-# =========================================================
-# Exact error-code search
-# =========================================================
+    best_per_device = {}
+    for metadata, distance in zip(probe["metadatas"][0], probe["distances"][0]):
+        device = metadata.get("device_id", "")
+        if device and (
+            device not in best_per_device or distance < best_per_device[device]
+        ):
+            best_per_device[device] = distance
+
+    if not best_per_device:
+        return [], None, probe
+
+    ranked = sorted(best_per_device.items(), key=lambda item: item[1])
+    best_distance = ranked[0][1]
+
+    if best_distance > MAX_DISTANCE:
+        return [], best_distance, probe
+
+    devices = [
+        device for device, distance in ranked
+        if distance <= best_distance + DEVICE_MARGIN
+        and distance <= MAX_DISTANCE
+    ][:MAX_DEVICES_SEARCHED]
+    return devices, best_distance, probe
+
+def search_devices(query, devices, top_k, hyde_query):
+    per_device = []
+    for device in devices:
+        result = hybrid_search(
+            query=query,
+            device_id=device,
+            top_k=top_k,
+            hyde_query=hyde_query,
+        )
+        if result["documents"][0]:
+            per_device.append(result)
+
+    if not per_device:
+        return {
+            "ids": [[]],
+            "documents": [[]],
+            "metadatas": [[]],
+            "distances": [[]],
+        }
+
+    if len(per_device) == 1:
+        return per_device[0]
+
+    per_device.sort(key=lambda r: r.get("true_best_distance", 1.0))
+    take = max(3, math.ceil(top_k / len(per_device)))
+    merged = {
+        "ids": [[]],
+        "documents": [[]],
+        "metadatas": [[]],
+        "distances": [[]],
+        "true_best_distance": min(
+            r.get("true_best_distance", 1.0) for r in per_device
+        ),
+    }
+    for result in per_device:
+        for key in ("ids", "documents", "metadatas", "distances"):
+            merged[key][0].extend(result[key][0][:take])
+    return merged
 
 MAX_EXACT_MATCHES = 5
-
 
 def exact_error_search(
     error_code,
     device_id=None,
 ):
-    client = chromadb.PersistentClient(path=str(VECTOR_DB_DIR))
-    collection = client.get_collection(name=COLLECTION_NAME)
+    collection = get_collection()
     filters = [{"error_code": str(error_code)}]
 
     if device_id:
@@ -479,9 +513,7 @@ def exact_error_search(
                 results[key] = results[key][:MAX_EXACT_MATCHES]
     return results
 
-
 FALSE_POSITIVE_ERROR_CODES = {"382"}
-
 
 def detect_error_code(query):
     patterns = [
@@ -499,11 +531,6 @@ def detect_error_code(query):
                 return None
             return code
     return None
-
-
-# =========================================================
-# Main retrieval entry point
-# =========================================================
 
 def retrieve(
     query,
@@ -524,61 +551,36 @@ def retrieve(
                 ),
                 "results": exact_results,
             }
-
-    search_device_id = device_id
-
-    # ---- Device detection probe: RAW query, no expansion, no HyDE ----
-    # (expansion here used to drag e.g. Philips questions to the wrong
-    # device because "voltage supply" matches other manuals better)
-    if search_device_id is None:
-        probe_results = semantic_search(
-            query=query,
-            device_id=None,
-            top_k=1,
-        )
-
-        if not probe_results["documents"][0]:
+    if device_id:
+        devices = [device_id]
+    else:
+        devices, _probe_distance, probe_results = detect_candidate_devices(query)
+        if not devices:
             return {
                 "retrieval_type": "not_found",
                 "detected_error_code": error_code,
                 "detected_device": None,
+                "candidate_devices": [],
                 "results": probe_results,
             }
-
-        probe_distance = probe_results["distances"][0][0]
-
-        if probe_distance > MAX_DISTANCE:
-            return {
-                "retrieval_type": "not_found",
-                "detected_error_code": error_code,
-                "detected_device": None,
-                "results": probe_results,
-            }
-
-        search_device_id = probe_results["metadatas"][0][0].get(
-            "device_id", ""
-        )
-
-    # HyDE only after the device is known and the query is relevant
-    # (saves one Groq call for irrelevant questions).
     hyde_query = generate_hypothetical_passage(query)
     print(f"HyDE rewrite: {hyde_query}")
+    print(f"Searching devices: {devices}")
 
-    semantic_results = hybrid_search(
+    semantic_results = search_devices(
         query=query,
-        device_id=search_device_id,
+        devices=devices,
         top_k=top_k,
         hyde_query=hyde_query,
     )
-
     if not semantic_results["documents"][0]:
         return {
             "retrieval_type": "not_found",
             "detected_error_code": error_code,
             "detected_device": None,
+            "candidate_devices": devices,
             "results": semantic_results,
         }
-
     best_distance = semantic_results.get(
         "true_best_distance",
         semantic_results["distances"][0][0],
@@ -591,17 +593,17 @@ def retrieve(
             "retrieval_type": "not_found",
             "detected_error_code": error_code,
             "detected_device": None,
+            "candidate_devices": devices,
             "results": semantic_results,
         }
-
     detected_device = semantic_results["metadatas"][0][0].get("device_id", "")
     return {
         "retrieval_type": "semantic",
         "detected_error_code": error_code,
         "detected_device": detected_device,
+        "candidate_devices": devices,
         "results": semantic_results,
     }
-
 
 def test_retrieve():
     query = "The ventilator has a power supply problem"
@@ -615,7 +617,6 @@ def test_retrieve():
     for doc in result["results"]["documents"][0]:
         print("-" * 70)
         print(doc[:300])
-
 
 if __name__ == "__main__":
     test_retrieve()
