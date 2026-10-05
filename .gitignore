@@ -12,6 +12,7 @@ tempCodeRunnerFile.py
 
 # Runtime / generated files
 voice_recordings/
+tts_cache/
 *.wav
 *.webm
 
